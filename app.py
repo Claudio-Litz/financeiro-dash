@@ -25,10 +25,9 @@ def carregar_categorias():
         lista = [item['nome'] for item in response.data]
         return sorted(lista)
     except:
-        return ["Geral", "Alimentação", "Transporte"]
+        return ["Geral", "Alimentação", "Transporte", "Lazer", "Contas"]
 
 def carregar_regras():
-    """Busca o cérebro do robô no banco"""
     try:
         response = supabase.table("regras").select("*").execute()
         return pd.DataFrame(response.data)
@@ -36,18 +35,12 @@ def carregar_regras():
         return pd.DataFrame()
 
 def categorizar_automatico(descricao, df_regras):
-    """Usa as regras do banco para decidir a categoria"""
     desc_lower = descricao.lower()
-    
-    # Se não tiver regras carregadas, retorna Geral
     if df_regras.empty:
         return "Geral"
-        
-    # Procura se alguma palavra chave está na descrição
     for index, row in df_regras.iterrows():
         if row['palavra_chave'].lower() in desc_lower:
             return row['categoria']
-            
     return "Geral"
 
 def processar_dados(df_raw, df_regras):
@@ -62,20 +55,31 @@ def processar_dados(df_raw, df_regras):
             valor = float(match_valor.group(1).replace('.', '').replace(',', '.')) if match_valor else 0.0
 
         # 2. Tipo
-        tipo = "Entrada" if any(x in texto.lower() for x in ["recebido", "crédito", "estorno"]) else "Saída"
+        tipo = "Entrada" if any(x in texto.lower() for x in ["recebido", "crédito", "estorno", "devolvido"]) else "Saída"
         
-        # 3. Descrição Limpa
-        termos_lixo = ["compra aprovada", "compra de", "r$", "bradesco", "inter", "pix enviado", "transacao", "no cartao"]
+        # 3. Descrição Limpa (Pix e Banco)
+        termos_lixo = [
+            "você recebeu um pix de", "voce recebeu um pix de", "pix recebido de", 
+            "da instituição", "compra aprovada", "compra de", "r$", 
+            "bradesco", "inter", "pix enviado", "transacao", "no cartao", "final"
+        ]
         desc_limpa = texto.lower()
         for t in termos_lixo:
             desc_limpa = desc_limpa.replace(t, "")
+        
         descricao = desc_limpa.strip().title()
         if len(descricao) < 2: descricao = "Não Identificado"
 
-        # 4. Categoria (Banco > Regra > Geral)
-        cat = row.get('categoria')
-        if not cat or cat == "null":
-            cat = categorizar_automatico(descricao, df_regras)
+        # 4. Categoria (Lógica: Robô > Banco > Geral)
+        cat_banco = row.get('categoria')
+        cat_robo = categorizar_automatico(descricao, df_regras)
+        
+        if cat_robo != "Geral":
+            cat = cat_robo
+        elif cat_banco and cat_banco != "null":
+            cat = cat_banco
+        else:
+            cat = "Geral"
 
         dados_processados.append({
             "id": row['id'],
@@ -88,55 +92,65 @@ def processar_dados(df_raw, df_regras):
         })
     return pd.DataFrame(dados_processados)
 
-# --- SIDEBAR ---
+# --- SIDEBAR (BARRA LATERAL) ---
 with st.sidebar:
     st.title("🎛️ Controle")
+    
+    # 1. DATA
     mes = st.selectbox("Mês", range(1, 13), index=datetime.now().month-1)
     ano = st.number_input("Ano", value=datetime.now().year)
-    lista_categorias = carregar_categorias()
     
     st.divider()
     
-    # --- ÁREA DE ENSINO (CÉREBRO) ---
+    # 2. GESTÃO DE CATEGORIAS (AQUI ESTÁ ELA DE VOLTA!)
+    st.markdown("### 🏷️ Categorias")
+    lista_categorias = carregar_categorias()
+    
+    with st.expander("➕ Criar Nova Categoria"):
+        nova_cat = st.text_input("Nome da nova categoria")
+        if st.button("Salvar Categoria"):
+            if nova_cat and nova_cat not in lista_categorias:
+                supabase.table("categorias").insert({"nome": nova_cat}).execute()
+                st.success(f"Categoria '{nova_cat}' criada!")
+                st.rerun()
+            elif nova_cat in lista_categorias:
+                st.warning("Essa categoria já existe.")
+
+    # 3. ENSINAR ROBÔ
     with st.expander("🧠 Ensinar o Robô (Regras)"):
-        st.write("Adicione palavras-chave para categorização automática.")
         with st.form("nova_regra"):
-            p_chave = st.text_input("Se conter a palavra:", placeholder="Ex: mcdonalds").lower()
+            p_chave = st.text_input("Se conter a palavra:", placeholder="Ex: claudio").lower()
             cat_alvo = st.selectbox("Categorizar como:", lista_categorias)
-            
             if st.form_submit_button("Salvar Regra"):
                 if p_chave:
                     supabase.table("regras").insert({"palavra_chave": p_chave, "categoria": cat_alvo}).execute()
                     st.success("Aprendido!")
                     st.rerun()
         
-        # Mostrar regras atuais
-        st.caption("Regras Atuais:")
+        # Listar Regras
         df_regras_display = carregar_regras()
         if not df_regras_display.empty:
+            st.caption("Regras Ativas:")
             st.dataframe(df_regras_display[['palavra_chave', 'categoria']], hide_index=True)
-            if st.button("🗑️ Limpar Regra Selecionada (Beta)"):
-                 st.info("Use o Supabase para deletar regras por enquanto.")
 
     st.divider()
-    
-    # Lançamento Manual
-    with st.expander("📝 Lançar Manual"):
-        with st.form("manual"):
-            tipo = st.radio("Tipo", ["Saída", "Entrada"], horizontal=True)
-            valor = st.number_input("Valor", min_value=0.0, step=0.1)
-            cat = st.selectbox("Categoria", lista_categorias)
-            desc = st.text_input("Descrição")
-            if st.form_submit_button("Lançar"):
-                msg = f"{'Recebido' if tipo == 'Entrada' else 'Gasto'} manual referente a {desc}"
-                supabase.table("transacoes").insert({
-                    "banco": "Carteira", "mensagem_notificacao": msg, "valor": valor, "categoria": cat
-                }).execute()
-                st.success("Salvo!")
-                st.rerun()
+
+    # 4. LANÇAMENTO MANUAL
+    st.markdown("### 📝 Lançar Manual")
+    with st.form("manual"):
+        tipo = st.radio("Tipo", ["Saída", "Entrada"], horizontal=True)
+        valor = st.number_input("Valor", min_value=0.0, step=0.1)
+        cat = st.selectbox("Categoria", lista_categorias)
+        desc = st.text_input("Descrição")
+        if st.form_submit_button("Lançar"):
+            msg = f"{'Recebido' if tipo == 'Entrada' else 'Gasto'} manual referente a {desc}"
+            supabase.table("transacoes").insert({
+                "banco": "Carteira", "mensagem_notificacao": msg, "valor": valor, "categoria": cat
+            }).execute()
+            st.success("Salvo!")
+            st.rerun()
 
 # --- CORPO PRINCIPAL ---
-# Carrega dados e regras
 df_raw_bd = pd.DataFrame(supabase.table("transacoes").select("*").order("data_hora", desc=True).execute().data)
 df_regras_bd = carregar_regras()
 
@@ -148,7 +162,6 @@ if not df_raw_bd.empty:
         # KPIs
         entradas = df_mes[df_mes['Tipo']=='Entrada']['Valor'].sum()
         saidas = df_mes[df_mes['Tipo']=='Saída']['Valor'].sum()
-        
         c1, c2, c3 = st.columns(3)
         c1.metric("Entradas", f"R$ {entradas:,.2f}")
         c2.metric("Saídas", f"R$ {saidas:,.2f}")
@@ -156,9 +169,8 @@ if not df_raw_bd.empty:
         
         st.divider()
 
-        # Botão Mágico para Re-classificar
+        # Botão para atualizar regras
         if st.button("🔄 Reaplicar Regras em Tudo"):
-            # Este botão serve para forçar a atualização visual caso você adicione uma regra nova
             st.rerun()
 
         # Gráficos
@@ -188,14 +200,16 @@ if not df_raw_bd.empty:
             hide_index=True, use_container_width=True, num_rows="dynamic", key="editor_dados"
         )
         
-        # Lógica de Salvar/Deletar (Mantida igual a anterior)
+        # Deletar
         if len(edicao) < len(df_editor):
             ids_originais = set(df_editor['id'])
             ids_novos = set(edicao['id'])
             for id_del in (ids_originais - ids_novos):
                 supabase.table("transacoes").delete().eq("id", id_del).execute()
+            st.toast("Item deletado!")
             st.rerun()
 
+        # Salvar Alterações de Categoria
         with st.expander("Ferramentas Avançadas"):
             if st.button("💾 Salvar Alterações Manuais de Categoria"):
                 for index, row in edicao.iterrows():
