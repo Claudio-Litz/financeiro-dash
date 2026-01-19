@@ -1,226 +1,221 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 from supabase import create_client, Client
 import re
-from datetime import datetime, timedelta
-import pytz
+from datetime import datetime
 
-# --- 1. CONFIGURAÇÃO DA PÁGINA ---
+# --- CONFIGURAÇÃO ---
 st.set_page_config(page_title="Gestão Financeira Pro", layout="wide", page_icon="💰")
 
-# --- 2. CONEXÃO COM SUPABASE ---
+# --- CONEXÃO ---
 try:
     url = st.secrets["SUPABASE_URL"]
     key = st.secrets["SUPABASE_KEY"]
     supabase: Client = create_client(url, key)
 except:
-    st.error("Erro de Conexão: Verifique o arquivo .streamlit/secrets.toml")
+    st.error("Erro de Conexão: Verifique os secrets.")
     st.stop()
 
-# --- 3. FUNÇÕES DE LÓGICA (CÉREBRO) ---
+# --- FUNÇÕES AUXILIARES ---
 
-def carregar_dados():
-    """Busca TODOS os dados do banco"""
-    response = supabase.table("transacoes").select("*").order("data_hora", desc=True).execute()
-    return pd.DataFrame(response.data)
+def carregar_categorias():
+    """Busca a lista de categorias do banco de dados"""
+    try:
+        response = supabase.table("categorias").select("nome").execute()
+        # Transforma em uma lista simples: ['Alimentação', 'Transporte', ...]
+        lista = [item['nome'] for item in response.data]
+        return sorted(lista)
+    except:
+        return ["Geral", "Alimentação", "Transporte"] # Fallback se der erro
 
-def processar_transacao(row):
-    """Lê a mensagem suja e transforma em dados limpos"""
-    texto = row['mensagem_notificacao']
-    banco = row['banco']
-    valor_bd = row['valor'] # Valor que veio do banco (se houver)
-    
-    # Se já tiver valor no banco (lançamento manual), usa ele.
-    if valor_bd and valor_bd > 0:
-        # Se for manual, tentamos descobrir o tipo pela mensagem que salvamos
-        tipo = "Entrada" if "Recebido" in texto else "Saída"
-        # O nome da loja/descrição vem do texto também
-        descricao = texto.replace("Recebido R$", "").replace("Pago R$", "").split("referente a")[-1].strip()
-        return valor_bd, descricao, tipo
+def adicionar_categoria(nova_cat):
+    """Salva uma nova categoria no banco"""
+    try:
+        supabase.table("categorias").insert({"nome": nova_cat}).execute()
+        return True
+    except:
+        return False
 
-    # --- LÓGICA PARA NOTIFICAÇÕES AUTOMÁTICAS ---
+def categorizar_automatico(descricao):
+    """
+    Tenta adivinhar a categoria baseada em palavras-chave.
+    Você pode adicionar mais regras aqui com o tempo.
+    """
+    desc_lower = descricao.lower()
     
-    # 1. Extrair Valor via Regex (R$ 1.200,50 ou 50,00)
-    match_valor = re.search(r'R\$\s?([\d\.]+,\d{2})', texto)
-    valor = 0.0
-    if match_valor:
-        valor_str = match_valor.group(1).replace('.', '').replace(',', '.')
-        valor = float(valor_str)
+    regras = {
+        "Transporte": ["uber", "99", "posto", "gasolina", "estacionamento"],
+        "Alimentação": ["ifood", "restaurante", "mercado", "padaria", "zédelivery", "burger", "pizza"],
+        "Lazer": ["netflix", "spotify", "cinema", "steam", "jogos"],
+        "Saúde": ["farmácia", "drogaria", "médico", "exame"],
+        "Moradia": ["luz", "agua", "internet", "aluguel", "condominio"]
+    }
     
-    # 2. Definir Tipo (Entrada ou Saída)
-    texto_lower = texto.lower()
-    termos_entrada = ["recebido", "recebida", "crédito", "estorno", "devolvido", "pix recebido", "depósito", "transferência recebida"]
-    tipo = "Saída" # Padrão
+    for categoria, palavras in regras.items():
+        for palavra in palavras:
+            if palavra in desc_lower:
+                return categoria
+                
+    return "Geral" # Se não achar nada
+
+def processar_dados(df_raw):
+    """Limpa e organiza os dados para exibição"""
+    dados_processados = []
     
-    for termo in termos_entrada:
-        if termo in texto_lower:
+    for idx, row in df_raw.iterrows():
+        texto = row['mensagem_notificacao']
+        banco = row['banco']
+        
+        # 1. Determina Valor
+        valor = row['valor']
+        if valor == 0 or valor is None:
+            # Tenta extrair do texto se vier zerado do MacroDroid
+            match_valor = re.search(r'R\$\s?([\d\.]+,\d{2})', texto)
+            if match_valor:
+                v_str = match_valor.group(1).replace('.', '').replace(',', '.')
+                valor = float(v_str)
+            else:
+                valor = 0.0
+
+        # 2. Determina Tipo (Entrada/Saída) e Descrição
+        texto_lower = texto.lower()
+        tipo = "Saída"
+        if any(x in texto_lower for x in ["recebido", "crédito", "estorno", "depósito"]):
             tipo = "Entrada"
-            break
-            
-    # 3. Limpar Descrição (Nome da Loja/Pessoa)
-    # Removemos termos comuns de banco para sobrar só o nome
-    termos_lixo = [
-        "compra aprovada", "compra de", "compra no cartão", "final", "bradesco", "inter", "nubank", 
-        "r$", "pix enviado", "pix recebido", "transferência realizada", "transferência recebida",
-        match_valor.group(0).lower() if match_valor else ""
-    ]
-    
-    desc_limpa = texto_lower
-    for lixo in termos_lixo:
-        desc_limpa = desc_limpa.replace(lixo, "")
-    
-    descricao = desc_limpa.strip().title()
-    if len(descricao) < 2: descricao = "Outros / Não Identificado"
-    
-    return valor, descricao, tipo
+        
+        # Limpeza da descrição
+        termos_lixo = ["compra aprovada", "compra de", "r$", "bradesco", "inter", "pix enviado", "transacao"]
+        desc_limpa = texto_lower
+        for t in termos_lixo:
+            desc_limpa = desc_limpa.replace(t, "")
+        descricao = desc_limpa.strip().title()
+        if len(descricao) < 2: descricao = "Não Identificado"
 
-# --- 4. INTERFACE LATERAL (FILTROS E INPUT) ---
+        # 3. Determina Categoria
+        # Se já tiver categoria salva no banco (input manual), usa ela.
+        # Se não tiver (automático), tenta adivinhar.
+        categoria_bd = row.get('categoria') 
+        if categoria_bd and categoria_bd != "null": 
+            categoria = categoria_bd
+        else:
+            categoria = categorizar_automatico(descricao)
+
+        dados_processados.append({
+            "Data": pd.to_datetime(row['data_hora']),
+            "Descrição": descricao,
+            "Valor": valor,
+            "Tipo": tipo,
+            "Categoria": categoria,
+            "Banco": banco
+        })
+        
+    return pd.DataFrame(dados_processados)
+
+# --- BARRA LATERAL ---
 with st.sidebar:
-    st.title("🎛️ Controle")
+    st.title("🎛️ Painel de Controle")
     
-    # --- FILTRO DE DATA ---
-    st.markdown("### 📅 Período")
+    # 1. Seletor de Data
     mes_atual = datetime.now().month
-    ano_atual = datetime.now().year
-    
-    # Seletores de Mês e Ano
-    col_mes, col_ano = st.columns(2)
-    mes_selecionado = col_mes.selectbox("Mês", range(1, 13), index=mes_atual-1)
-    ano_selecionado = col_ano.number_input("Ano", min_value=2024, max_value=2030, value=ano_atual)
-    
+    mes = st.selectbox("Mês", range(1, 13), index=mes_atual-1)
+    ano = st.number_input("Ano", value=datetime.now().year)
     st.divider()
     
-    # --- INPUT MANUAL ---
-    st.markdown("### 📝 Lançamento Manual")
-    with st.form("form_manual"):
-        tipo_input = st.radio("Tipo", ["Saída 🔴", "Entrada 🟢"], horizontal=True)
-        valor_input = st.number_input("Valor (R$)", min_value=0.0, step=1.00, format="%.2f")
-        desc_input = st.text_input("Descrição (O que é?)")
-        cat_input = st.selectbox("Categoria", ["Alimentação", "Transporte", "Casa", "Lazer", "Serviços", "Outros"])
-        
-        btn_salvar = st.form_submit_button("💾 Salvar Lançamento", use_container_width=True)
-        
-        if btn_salvar and valor_input > 0:
-            # Formata mensagem fake para manter padrão
-            prefixo = "Recebido" if "Entrada" in tipo_input else "Pago"
-            msg_fake = f"{prefixo} R$ {valor_input} referente a {desc_input}"
-            
-            dados = {
-                "banco": "Carteira/Manual",
-                "mensagem_notificacao": msg_fake,
-                "valor": valor_input,
-                "categoria": cat_input,
-                "data_hora": datetime.now().isoformat()
-            }
-            try:
-                supabase.table("transacoes").insert(dados).execute()
-                st.toast("Salvo com sucesso!", icon="✅")
-                st.rerun() # Recarrega a página
-            except Exception as e:
-                st.error(f"Erro ao salvar: {e}")
+    # 2. Gestão de Categorias
+    st.markdown("### 🏷️ Categorias")
+    lista_categorias = carregar_categorias()
+    
+    with st.expander("Adicionar Nova Categoria"):
+        nova_cat_nome = st.text_input("Nome da nova categoria")
+        if st.button("Salvar Categoria"):
+            if nova_cat_nome and nova_cat_nome not in lista_categorias:
+                if adicionar_categoria(nova_cat_nome):
+                    st.success("Adicionada!")
+                    st.rerun()
+                else:
+                    st.error("Erro ao salvar")
+            else:
+                st.warning("Nome inválido ou já existe")
 
-# --- 5. PROCESSAMENTO DE DADOS (PANDAS) ---
-df_raw = carregar_dados()
+    st.divider()
+
+    # 3. Lançamento Manual
+    st.markdown("### 📝 Novo Gasto/Ganho")
+    with st.form("manual"):
+        f_tipo = st.radio("Tipo", ["Saída", "Entrada"], horizontal=True)
+        f_valor = st.number_input("Valor", min_value=0.0, step=0.1)
+        f_cat = st.selectbox("Categoria", lista_categorias)
+        f_desc = st.text_input("Descrição (Opcional)")
+        
+        if st.form_submit_button("Lançar"):
+            msg_fake = f"{'Recebido' if f_tipo == 'Entrada' else 'Gasto'} manual referente a {f_desc}"
+            supabase.table("transacoes").insert({
+                "banco": "Carteira",
+                "mensagem_notificacao": msg_fake,
+                "valor": f_valor,
+                "categoria": f_cat,
+                "data_hora": datetime.now().isoformat()
+            }).execute()
+            st.success("Lançado!")
+            st.rerun()
+
+# --- CORPO DO DASHBOARD ---
+# Busca dados brutos
+df_raw = pd.DataFrame(supabase.table("transacoes").select("*").order("data_hora", desc=True).execute().data)
 
 if not df_raw.empty:
-    # Converter data para datetime
-    df_raw['data_hora'] = pd.to_datetime(df_raw['data_hora'])
+    # Processa (Limpa e Categoriza)
+    df = processar_dados(df_raw)
     
-    # Aplicar Filtro de Data (Mês e Ano selecionados)
-    df_filtrado = df_raw[
-        (df_raw['data_hora'].dt.month == mes_selecionado) & 
-        (df_raw['data_hora'].dt.year == ano_selecionado)
-    ].copy()
+    # Filtra por Data
+    df = df[
+        (df['Data'].dt.month == mes) & 
+        (df['Data'].dt.year == ano)
+    ]
     
-    if not df_filtrado.empty:
-        # Processar linha a linha para limpar dados
-        dados_processados = []
-        for idx, row in df_filtrado.iterrows():
-            v, d, t = processar_transacao(row)
-            dados_processados.append({
-                "Data": row['data_hora'],
-                "Descrição": d,
-                "Valor": v,
-                "Tipo": t,
-                "Banco": row['banco']
-            })
+    if not df.empty:
+        # --- CÁLCULOS TOTAIS ---
+        entradas = df[df['Tipo']=='Entrada']['Valor'].sum()
+        saidas = df[df['Tipo']=='Saída']['Valor'].sum()
+        saldo = entradas - saidas
         
-        df_final = pd.DataFrame(dados_processados)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Entradas", f"R$ {entradas:,.2f}")
+        c2.metric("Saídas (Gastos)", f"R$ {saidas:,.2f}", delta_color="inverse")
+        c3.metric("Saldo", f"R$ {saldo:,.2f}")
         
-        # --- 6. O DASHBOARD (GRÁFICOS) ---
+        st.divider()
         
-        st.header(f"Resumo Financeiro - {mes_selecionado}/{ano_selecionado}")
-        
-        # KPIs (Números Grandes)
-        total_entradas = df_final[df_final['Tipo'] == 'Entrada']['Valor'].sum()
-        total_saidas = df_final[df_final['Tipo'] == 'Saída']['Valor'].sum()
-        saldo = total_entradas - total_saidas
-        
-        kpi1, kpi2, kpi3 = st.columns(3)
-        kpi1.metric("🟢 Total Recebido", f"R$ {total_entradas:,.2f}")
-        kpi2.metric("🔴 Total Gasto", f"R$ {total_saidas:,.2f}")
-        kpi3.metric("💰 Saldo do Mês", f"R$ {saldo:,.2f}", delta_color="normal")
-        
-        st.markdown("---")
-        
-        # ÁREA DE GRÁFICOS
-        g1, g2 = st.columns([1, 1])
+        # --- GRÁFICOS POR CATEGORIA ---
+        g1, g2 = st.columns(2)
         
         with g1:
-            st.subheader("Onde estou gastando? (Saídas)")
-            df_saidas = df_final[df_final['Tipo'] == 'Saída']
-            if not df_saidas.empty:
-                # Agrupar por descrição para somar gastos repetidos no mesmo lugar
-                df_saidas_agrupado = df_saidas.groupby("Descrição")["Valor"].sum().reset_index()
-                fig_saida = px.bar(
-                    df_saidas_agrupado, 
-                    x='Valor', 
-                    y='Descrição', 
-                    orientation='h',
-                    color='Valor',
-                    color_continuous_scale='Reds'
-                )
-                st.plotly_chart(fig_saida, use_container_width=True)
+            st.subheader("Gastos por Categoria")
+            df_saida = df[df['Tipo']=='Saída']
+            if not df_saida.empty:
+                # Agrupa por CATEGORIA (não mais por descrição)
+                df_cat = df_saida.groupby("Categoria")["Valor"].sum().reset_index()
+                fig = px.pie(df_cat, values='Valor', names='Categoria', hole=0.5)
+                st.plotly_chart(fig, use_container_width=True)
             else:
-                st.info("Nenhuma saída neste mês.")
+                st.info("Sem gastos no período.")
                 
         with g2:
-            st.subheader("Fontes de Renda (Entradas)")
-            df_entradas = df_final[df_final['Tipo'] == 'Entrada']
-            if not df_entradas.empty:
-                fig_entrada = px.pie(
-                    df_entradas, 
-                    values='Valor', 
-                    names='Descrição', 
-                    hole=0.4,
-                    color_discrete_sequence=px.colors.sequential.Greens_r
-                )
-                st.plotly_chart(fig_entrada, use_container_width=True)
-            else:
-                st.info("Nenhuma entrada neste mês.")
-
-        # HISTÓRICO COMPLETO
-        st.markdown("### 📜 Extrato Detalhado")
+            st.subheader("Ranking de Despesas")
+            if not df_saida.empty:
+                df_cat = df_saida.groupby("Categoria")["Valor"].sum().reset_index().sort_values("Valor")
+                fig = px.bar(df_cat, x="Valor", y="Categoria", orientation='h')
+                st.plotly_chart(fig, use_container_width=True)
         
-        # Ordenar e formatar para exibição bonita
-        df_display = df_final.sort_values(by="Data", ascending=False)
-        
-        # Colorir tabela (truque visual do Pandas)
-        def color_negative_red(val):
-            color = 'red' if val == "Saída" else 'green'
-            return f'color: {color}'
-
+        # --- TABELA FINAL ---
+        st.subheader("Extrato Detalhado")
         st.dataframe(
-            df_display.style.format({"Valor": "R$ {:.2f}"}),
-            use_container_width=True,
-            height=400
+            df[['Data', 'Categoria', 'Descrição', 'Valor', 'Tipo', 'Banco']].sort_values('Data', ascending=False),
+            use_container_width=True
         )
-
+        
     else:
-        st.warning(f"Não há dados registrados para o mês {mes_selecionado}/{ano_selecionado}.")
-        st.info("Tente mudar o mês no menu lateral ou faça um lançamento manual.")
-
+        st.warning("Nada encontrado neste mês.")
 else:
-    st.info("Seu banco de dados está vazio. Aguardando a primeira notificação chegar...")
+    st.info("Banco de dados vazio.")
