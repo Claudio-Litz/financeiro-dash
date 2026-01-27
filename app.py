@@ -51,35 +51,29 @@ def processar_dados(df_raw, df_regras):
     dados_processados = []
     
     for idx, row in df_raw.iterrows():
-        texto = row.get('mensagem_notificacao', '')
+        # Pegamos o texto original COMPLETO
+        texto_original = row.get('mensagem_notificacao', '')
         valor = row.get('valor', 0.0)
         
-        # 1. Valor (Se vier zerado, tenta extrair do texto)
+        # 1. Valor (Mantemos a lógica de extrair valor se vier zerado)
         if valor == 0 or valor is None:
-            match_valor = re.search(r'R\$\s?([\d\.]+,\d{2})', texto)
+            match_valor = re.search(r'R\$\s?([\d\.]+,\d{2})', texto_original)
             valor = float(match_valor.group(1).replace('.', '').replace(',', '.')) if match_valor else 0.0
 
-        # 2. Tipo (Lógica: Se tiver salvo no banco, usa. Se não, calcula.)
-        tipo_banco = row.get('tipo') # Tenta pegar a coluna nova
-        
+        # 2. Tipo (Mantemos a lógica de identificar Entrada/Saída)
+        tipo_banco = row.get('tipo') 
         if tipo_banco and type(tipo_banco) == str:
-            tipo = tipo_banco # Usa o que você salvou manualmente
+            tipo = tipo_banco
         else:
-            # Lógica automática (Fallback)
-            tipo = "Entrada" if any(x in texto.lower() for x in ["recebido", "crédito", "estorno", "devolvido"]) else "Saída"
+            tipo = "Entrada" if any(x in texto_original.lower() for x in ["recebido", "crédito", "estorno", "devolvido"]) else "Saída"
         
-        # 3. Descrição Limpa
-        termos_lixo = [
-            "você recebeu um pix de", "voce recebeu um pix de", "pix recebido de", 
-            "da instituição", "compra aprovada", "compra de", "r$", 
-            "bradesco", "inter", "pix enviado", "transacao", "no cartao", "final"
-        ]
-        desc_limpa = texto.lower()
-        for t in termos_lixo:
-            desc_limpa = desc_limpa.replace(t, "")
+        # --- MUDANÇA AQUI (Passo 3) ---
+        # Antes tinha um filtro que cortava o texto.
+        # Agora usamos o texto_original direto, apenas removendo espaços extras nas pontas.
+        descricao = texto_original.strip() 
         
-        descricao = desc_limpa.strip().title()
-        if len(descricao) < 2: descricao = "Não Identificado"
+        if not descricao: # Se chegar vazio mesmo assim
+            descricao = "Não Identificado"
 
         # 4. Categoria
         cat_banco = row.get('categoria')
@@ -95,7 +89,7 @@ def processar_dados(df_raw, df_regras):
         dados_processados.append({
             "id": row['id'],
             "Data": pd.to_datetime(row['data_hora']),
-            "Descrição": descricao,
+            "Descrição": descricao, # <--- Agora vai o texto completo
             "Valor": valor,
             "Tipo": tipo,
             "Categoria": cat,
