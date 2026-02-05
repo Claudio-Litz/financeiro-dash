@@ -256,26 +256,30 @@ if not df_raw_bd.empty:
                 progresso = st.progress(0)
                 total_linhas = len(edicao)
                 
-                for index, row in edicao.iterrows():
-                    # Pega os dados da linha
-                    id_transacao = row['id']
+                try:
+                    # CORREÇÃO AQUI: Usamos 'enumerate' para gerar um contador 'i' (0, 1, 2...)
+                    # O 'index' original continua existindo, mas não usamos ele para a barra.
+                    for i, (index, row) in enumerate(edicao.iterrows()):
+                        id_transacao = row['id']
+                        
+                        dados_para_atualizar = {
+                            "categoria": row['Categoria'],
+                            "valor": row['Valor'],
+                            "mensagem_notificacao": row['Descrição'], 
+                            "tipo": row['Tipo']
+                        }
+                        
+                        supabase.table("transacoes").update(dados_para_atualizar).eq("id", id_transacao).execute()
+                        
+                        # Agora a conta usa 'i' (contador real) e não o índice do banco
+                        progresso.progress((i + 1) / total_linhas)
                     
-                    # Atualiza TUDO: Categoria, Valor, Descrição e TIPO
-                    dados_para_atualizar = {
-                        "categoria": row['Categoria'],
-                        "valor": row['Valor'],
-                        "mensagem_notificacao": row['Descrição'], # Usa a coluna descrição como msg
-                        "tipo": row['Tipo'] # <--- Salva o tipo (Entrada/Saída)
-                    }
-                    
-                    # Envia pro Supabase
-                    supabase.table("transacoes").update(dados_para_atualizar).eq("id", id_transacao).execute()
-                    
-                    # Atualiza barra de progresso
-                    progresso.progress((index + 1) / total_linhas)
-                
-                st.success("Dados atualizados com sucesso!")
-                st.rerun()
+                    st.success("Dados atualizados com sucesso!")
+                    st.rerun()
+
+                except Exception as e:
+                    st.error("Ocorreu um erro ao salvar:")
+                    st.code(e)
 
     else:
         st.warning("Nenhuma transação encontrada neste mês.")
