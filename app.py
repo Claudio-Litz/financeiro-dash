@@ -65,7 +65,7 @@ def processar_dados(df_raw, df_regras):
         if tipo_banco and type(tipo_banco) == str:
             tipo = tipo_banco
         else:
-            tipo = "Entrada" if any(x in texto_original.lower() for x in ["recebido", "crédito", "estorno", "devolvido"]) else "Saída"
+            tipo = "Entrada" if any(x in texto_original.lower() for x in ["recebido", "crédito", "estorno", "devolvido", "creditado","recebeu"]) else "Saída"
         
         # --- MUDANÇA AQUI (Passo 3) ---
         # Antes tinha um filtro que cortava o texto.
